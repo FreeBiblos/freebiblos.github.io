@@ -72,3 +72,11 @@ KJV, and replace `bcl-1909` with the full Bible.
       and Scourby if licensed.
 - [ ] Alexander Scourby KJV audio: permission request emailed to Scourby Bible Media (Litchfield
       Associates, Tampa) — waiting for a reply. Use only with a written license.
+
+## Decided against
+
+- ESV (Oct 2026): Crossway's free API requires an esv.org link on every ESV screen, at most 500
+  verses or half a book shown or stored (no offline, no whole-book scroll), a hidden key (needs a
+  server) and 5,000 requests/day shared by all readers; full licenses go only to organizations, and
+  Crossway has refused sites that show the ESV beside free Bibles. The BSB is the closest free text
+  and is already in the app.
