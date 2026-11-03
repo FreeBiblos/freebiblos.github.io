@@ -75,8 +75,8 @@ KJV, and replace `bcl-1909` with the full Bible.
 
 ## Decided against
 
-- ESV (Oct 2026): Crossway's free API requires an esv.org link on every ESV screen, at most 500
-  verses or half a book shown or stored (no offline, no whole-book scroll), a hidden key (needs a
-  server) and 5,000 requests/day shared by all readers; full licenses go only to organizations, and
-  Crossway has refused sites that show the ESV beside free Bibles. The BSB is the closest free text
-  and is already in the app.
+- ESV for everyone (Oct 2026): Crossway's free API requires an esv.org link on every ESV screen, at
+  most 500 verses or half a book shown or stored (no offline), a hidden key and 5,000 requests/day
+  shared by all readers; full licenses go only to organizations, and Crossway has refused sites that
+  show the ESV beside free Bibles. The BSB is the closest free text and is already in the app.
+  (Nov 2026: the ESV is on for the owner's account only, through their own API key — Aa → Account.)
