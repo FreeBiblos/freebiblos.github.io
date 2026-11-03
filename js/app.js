@@ -95,6 +95,18 @@
     ['ig', 'Igbo', 'Baịbụlụ Nsọ (Open)', 'Baịbụlụ', 'ig'],
   ];
   LANG_TEXTS.forEach(([id, group, name, short, lang]) => { TEXTS[id] = { name, short, file: `data/texts/${id}.json`, lang, group }; });
+  // The ESV is under copyright (Crossway), so it is only for the owner's account, read through
+  // Crossway's ESV API with the owner's own key. Following the API's terms, it is fetched and shown
+  // one chapter at a time, kept only in memory (never more than 500 verses or half a book), and each
+  // chapter carries Crossway's notice and a link to esv.org. It uses the KJV's verse numbering.
+  TEXTS.esv = { name: 'English Standard Version (ESV)', short: 'ESV', lang: 'en', esv: true };
+  const ESV_OWNER = 'c15b0626c18c55f9ef6385f2974aee3238526b6484833cd1993b083fdc25eeb0';   // SHA-256 of the owner's sign-in email
+  const ESV_API = 'https://api.esv.org/v3/passage/text/';
+  let esvOwner = false;
+  const esvCache = new Map();     // 'b:c' -> verses of a fetched chapter, least recently used first
+  const esvPending = new Map();   // 'b:c' -> request in flight
+  const esvErrors = new Map();    // 'b:c' -> why the last request failed
+  let bookSizes = [];             // verses per book (KJV numbering)
   let APOC = null;           // the KJV's Apocrypha, for "KJV underneath" in the Septuagint's extra books
   const loadedTexts = {};    // file -> parsed JSON
   // Per book, for the text on screen: where it came from, printed chapter/verse labels, and its
@@ -126,6 +138,7 @@
       plan: { ...DEFAULTS.plan, ...s.plan, done: { ...(s.plan && s.plan.done) } },
       updatedAt: s.updatedAt || 0,   // last change to synced data (ribbon, bookmarks, plan)
       syncUid: s.syncUid || null,    // account this device last synced with
+      esvKey: typeof s.esvKey === 'string' ? s.esvKey : '',   // the owner's ESV API key (owner's account only)
     };
   }
   let saveTimer = 0;
@@ -150,6 +163,7 @@
   // ---------- Helpers ----------
   const bookName = (b) => BIBLE[b][0];
   const chapterCount = (b) => BIBLE[b][1].length;
+  const chapterLen = (b, c) => BIBLE[b][1][c - 1].length;
   const verseText = (b, c, v) => ((BIBLE[b][1][c - 1] || [])[v - 1] || '').replace('¶', '');
   const kjvText = (b, c, v) => {
     const book = b >= 66 ? (APOC && APOC.books[b]) : KJV[b][1];
@@ -205,7 +219,7 @@
     if (state.ribbonText === id) return;
     const fromId = state.ribbonText;
     let k = state.ribbon;
-    if (fromId !== 'kjv') {
+    if (fromId !== 'kjv' && fromId !== 'esv') {   // the ESV uses the KJV's numbering
       // The ribbon is in another text's numbering: go through the KJV using that text's map.
       const saved = [BIBLE, SRC, CHLABELS, VLABELS, MAP, REVERSE];
       if (!buildText(fromId)) { k = { b: 0, c: 1, v: 1 }; } else k = toKjv(k);
@@ -217,6 +231,14 @@
   // Assemble the text on screen. Returns false if its files aren't loaded yet.
   function buildText(id) {
     const t = TEXTS[id] || TEXTS.kjv;
+    if (t.esv) {
+      if (!state.esvKey) return false;
+      // Chapters not fetched yet are empty lists the length of the KJV chapter.
+      BIBLE = KJV.map(([name, chapters], b) => [name, chapters.map((ch, i) => esvCache.get(`${b}:${i + 1}`) || ch.map(() => ''))]);
+      SRC = KJV.map(() => 'esv');
+      CHLABELS = KJV.map(() => null); VLABELS = KJV.map(() => null); MAP = KJV.map(() => null); REVERSE = KJV.map(() => null);
+      return true;
+    }
     const ot = t.file ? loadedTexts[t.file] : null;
     const nt = t.nt ? loadedTexts[t.nt] : null;
     if ((t.file && !ot) || (t.nt && !nt)) return false;
@@ -288,6 +310,167 @@
   }
   const esc = (s) => s.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
 
+  // ---------- The ESV (owner's account only) ----------
+  const esvKeyOf = (b, c) => `${b}:${c}`;
+  const esvOn = () => SRC[0] === 'esv';
+  const esvMissing = (b, c) => SRC[b] === 'esv' && !esvCache.has(esvKeyOf(b, c));
+  const ESV_NOTICE = 'Scripture quotations are from the ESV® Bible (The Holy Bible, English Standard Version®), © 2001 by Crossway, a publishing ministry of Good News Publishers. Used by permission. All rights reserved.';
+  const ESV_ERRORS = {
+    offline: 'The ESV needs an internet connection.',
+    key: 'Your ESV key wasn’t accepted. Check it under Aa → Account.',
+    limit: 'The ESV’s daily limit has been reached. Please try again later.',
+  };
+  // The API's limits on what may be shown or kept at once: 500 verses, and no more than half of any
+  // book (a single chapter may always be fetched, which covers one-chapter books).
+  function esvFits(entries) {
+    let total = 0;
+    const per = {};
+    for (const [k, vs] of entries) {
+      const b = +k.split(':')[0];
+      total += vs.length;
+      (per[b] = per[b] || []).push(vs.length);
+    }
+    return total <= 500 && Object.keys(per).every((b) => per[b].length === 1 || per[b].reduce((a, n) => a + n, 0) * 2 <= bookSizes[b]);
+  }
+  function dropEsv(k) {
+    esvCache.delete(k);
+    const [b, c] = k.split(':').map(Number);
+    if (BIBLE && SRC[b] === 'esv') BIBLE[b][1][c - 1] = KJV[b][1][c - 1].map(() => '');
+  }
+  function useEsv(k) {   // most recently used goes last
+    const vs = esvCache.get(k);
+    if (vs) { esvCache.delete(k); esvCache.set(k, vs); }
+  }
+  // Keep a fetched chapter, letting go of the least recently used ones to stay inside the limits.
+  // A chapter fetched ahead never pushes out the one on screen; it is dropped instead.
+  function keepEsv(k, verses, ahead) {
+    const shown = esvKeyOf(state.ribbon.b, state.ribbon.c);
+    const fits = () => esvFits([...esvCache.entries(), [k, verses]]);
+    for (const old of [...esvCache.keys()]) {
+      if (fits()) break;
+      if (!(ahead && old === shown)) dropEsv(old);
+    }
+    if (!fits()) return false;
+    esvCache.set(k, verses);
+    const [b, c] = k.split(':').map(Number);
+    if (BIBLE && SRC[b] === 'esv') BIBLE[b][1][c - 1] = verses;
+    return true;
+  }
+  // The API's plain text: "[1] In the beginning, God created…", with blank lines and indents between
+  // paragraphs. Verses are fitted to the KJV's numbering: a verse the KJV doesn't number (3 John 15)
+  // joins the one before it, and verses the ESV leaves out (footnoted there) stay empty.
+  function parseEsv(text, count) {
+    const verses = new Array(count).fill('');
+    const parts = String(text).replace(/\s*\(ESV\)\s*$/, '').split(/\[(\d+)\]/);
+    if (parts.length < 3) throw new Error('format');
+    const lead = parts[0].replace(/\s+/g, ' ').trim();   // a psalm's title comes before verse 1
+    for (let i = 1; i < parts.length; i += 2) {
+      const n = Math.min(+parts[i], count);
+      let t = parts[i + 1].replace(/\s+/g, ' ').trim();
+      if (i === 1 && lead) t = `${lead} ${t}`;
+      if (n < 1 || !t) continue;
+      const para = i > 1 && /\n\s*\n\s*$|\n[ \t]+$/.test(parts[i - 1]);
+      verses[n - 1] = verses[n - 1] ? `${verses[n - 1]} ${t}` : (para ? '¶' : '') + t;
+    }
+    return verses;
+  }
+  async function fetchEsv(key, b, c) {
+    const params = new URLSearchParams({
+      q: `${b === 18 ? 'Psalm' : KJV[b][0]} ${c}`,
+      'include-passage-references': 'false', 'include-verse-numbers': 'true', 'include-first-verse-numbers': 'true',
+      'include-footnotes': 'false', 'include-footnote-body': 'false', 'include-headings': 'false',
+      'include-short-copyright': 'false', 'include-copyright': 'false', 'include-selahs': 'true',
+      'indent-poetry': 'false', 'indent-paragraphs': '2', 'line-length': '0',
+    });
+    let res;
+    try {
+      res = await fetch(`${ESV_API}?${params}`, { headers: { Authorization: `Token ${key}` }, cache: 'no-store' });
+    } catch (e) { throw new Error('offline'); }
+    if (res.status === 401 || res.status === 403) throw new Error('key');
+    if (res.status === 429) throw new Error('limit');
+    if (!res.ok) throw new Error('server');
+    const data = await res.json();
+    // Make sure the API read the reference as this chapter (verse ids are BBCCCVVV).
+    const first = data.parsed && data.parsed[0] && data.parsed[0][0];
+    if (Math.floor(first / 1000) !== (b + 1) * 1000 + c) throw new Error('format');
+    return parseEsv((data.passages || []).join('\n\n'), KJV[b][1][c - 1].length);
+  }
+  function fetchEsvOnce(b, c) {
+    const k = esvKeyOf(b, c);
+    if (!esvPending.has(k)) {
+      const key = state.esvKey;
+      esvErrors.delete(k);
+      esvPending.set(k, fetchEsv(key, b, c)
+        .then((verses) => { if (key !== state.esvKey) throw new Error('key'); return verses; })
+        .catch((e) => { esvErrors.set(k, e.message); throw e; })
+        .finally(() => esvPending.delete(k)));
+    }
+    return esvPending.get(k);
+  }
+  function loadEsv(b, c, ahead) {
+    const k = esvKeyOf(b, c);
+    if (esvCache.has(k)) return Promise.resolve(true);
+    return fetchEsvOnce(b, c).then((verses) => esvCache.has(k) || keepEsv(k, verses, ahead));
+  }
+  // A chapter is needed on screen: fetch it, then draw it in place of the placeholder.
+  // After a failure it waits for "Try again" rather than asking over and over.
+  function wantEsv(b, c) {
+    const k = esvKeyOf(b, c);
+    if (esvPending.has(k) || esvErrors.has(k)) return;
+    loadEsv(b, c, false).then(() => redrawEsv(b, c), () => redrawEsv(b, c));
+  }
+  function redrawEsv(b, c) {
+    if (!esvOn()) return;
+    const onScreen = state.settings.mode === 'page' ? pg.b === b && pg.c === c : renderedEsv === esvKeyOf(b, c);
+    if (!onScreen) return;
+    const r = state.ribbon;
+    renderedEsv = '';
+    player.internal = true;   // redrawing isn't the reader moving
+    goTo(r.b, r.c, r.v);
+    player.internal = false;
+  }
+  // Fetch the next chapter ahead, when it can be kept alongside this one.
+  function aheadEsv(b, c) {
+    const n = nextChapter(b, c);
+    if (!n || !state.esvKey) return;
+    const k = esvKeyOf(n[0], n[1]);
+    if (esvCache.has(k) || esvPending.has(k)) return;
+    if (!esvFits([[esvKeyOf(b, c), BIBLE[b][1][c - 1]], [k, KJV[n[0]][1][n[1] - 1]]])) return;
+    loadEsv(n[0], n[1], true).catch(() => esvErrors.delete(k));   // tried again when it's needed
+  }
+  function esvWaitHTML(b, c) {
+    wantEsv(b, c);
+    const err = esvErrors.get(esvKeyOf(b, c));
+    const msg = err ? ESV_ERRORS[err] || 'Couldn’t load this chapter of the ESV.' : 'Loading the ESV…';
+    const retry = err ? ` <button type="button" class="link" data-esv-retry="${b}:${c}">Try again</button>` : '';
+    return `<section class="chapter esv-wait" data-b="${b}" data-c="${c}" lang="en"><p class="esv-note">${esc(msg)}${retry}</p></section>`;
+  }
+  const esvCreditHTML = () => `<p class="esv-credit" lang="en">${esc(ESV_NOTICE)} <a href="https://www.esv.org" target="_blank" rel="noopener">www.esv.org</a></p>`;
+  // In scroll mode the ESV shows one chapter, with buttons to the chapters either side.
+  function esvNavHTML(b, c) {
+    const btn = (to, label) => `<button type="button" class="secondary" data-esv-go="${to[0]}:${to[1]}">${label}</button>`;
+    const p = prevChapter(b, c), n = nextChapter(b, c);
+    return `<nav class="esv-nav">${p ? btn(p, `‹ ${esc(bookName(p[0]))} ${p[1]}`) : '<span></span>'}${n ? btn(n, `${esc(bookName(n[0]))} ${n[1]} ›`) : ''}</nav>`;
+  }
+  // Taps on the ESV's own buttons and link (returns true when handled).
+  function esvAction(e) {
+    if (e.target.closest('a')) return true;
+    const go = e.target.closest('[data-esv-go]');
+    if (go) {
+      const [b, c] = go.dataset.esvGo.split(':').map(Number);
+      goTo(b, c, 1);
+      return true;
+    }
+    const retry = e.target.closest('[data-esv-retry]');
+    if (retry) {
+      const [b, c] = retry.dataset.esvRetry.split(':').map(Number);
+      esvErrors.delete(esvKeyOf(b, c));
+      redrawEsv(b, c);
+      return true;
+    }
+    return false;
+  }
+
   let toastTimer = 0;
   function toast(msg) {
     const t = $('#toast');
@@ -305,6 +488,8 @@
     return `<h1 class="book-title">${esc(bookName(b))}</h1>`;
   }
   function chapterHTML(b, c) {
+    if (esvMissing(b, c)) return esvWaitHTML(b, c);
+    if (SRC[b] === 'esv') useEsv(esvKeyOf(b, c));
     const verses = BIBLE[b][1][c - 1];
     const poetry = isPoetry(b, c);
     const under = state.settings.under && SRC[b] !== 'kjv' && (!isExtra(b) || (MAP[b] && APOC));
@@ -312,6 +497,7 @@
     let h = `<section class="chapter${poetry ? ' poetry' : ''}${under ? ' with-under' : ''}" data-b="${b}" data-c="${c}" lang="${lang}"${rtlBook(b) ? ' dir="rtl"' : ''}>`;
     h += `<p><span class="dropcap">${esc(chLabel(b, c))}</span>`;
     verses.forEach((t, i) => {
+      if (!t && SRC[b] === 'esv') return;   // a verse the ESV leaves out
       // ¶ marks a paragraph break in the text; start a new paragraph there in prose.
       if (t[0] === '¶') {
         t = t.slice(1);
@@ -322,7 +508,7 @@
       h += `<span class="v${i === 0 ? ' first' : ''}${hl ? ' hl hl-' + hl : ''}" data-b="${b}" data-c="${c}" data-v="${i + 1}"><sup class="vn">${esc(label)}</sup>${esc(t)} </span>`;
       if (under) h += kjvUnderHTML(b, c, i + 1);
     });
-    return h + '</p></section>';
+    return h + '</p>' + (SRC[b] === 'esv' ? esvCreditHTML() : '') + '</section>';
   }
   // The matching KJV verse(s) under a verse of another text.
   function kjvUnderHTML(b, c, v) {
@@ -343,6 +529,7 @@
   let renderedBook = -1;   // the book the scroll view was opened at (-1: needs a fresh render)
   let renderedBooks = [];  // books currently on the page, in order
   let verseEls = [];
+  let renderedEsv = '';    // the ESV chapter on the page in scroll mode ('b:c')
 
   function bookHTML(b) {
     let h = `<div class="bk" data-b="${b}">` + titleHTML(b);
@@ -353,7 +540,16 @@
     bookEl.innerHTML = bookHTML(b);
     renderedBook = b;
     renderedBooks = [b];
+    renderedEsv = '';
     verseEls = Array.from(bookEl.querySelectorAll('.v'));
+  }
+  function renderEsvChapter(b, c) {
+    bookEl.innerHTML = `<div class="bk" data-b="${b}">${c === 1 ? titleHTML(b) : ''}${chapterHTML(b, c)}${esvNavHTML(b, c)}</div>`;
+    renderedBook = b;
+    renderedBooks = [b];
+    renderedEsv = esvKeyOf(b, c);
+    verseEls = Array.from(bookEl.querySelectorAll('.v'));
+    if (!esvMissing(b, c)) aheadEsv(b, c);
   }
   function appendNextBook() {
     const last = renderedBooks[renderedBooks.length - 1];
@@ -399,7 +595,7 @@
     verseEls = Array.from(bookEl.querySelectorAll('.v'));
   }
   function maybeAppend() {
-    if (state.settings.mode !== 'scroll' || renderedBook < 0) return;
+    if (state.settings.mode !== 'scroll' || renderedBook < 0 || esvOn()) return;
     if (window.scrollY + window.innerHeight * 3 > document.documentElement.scrollHeight) appendNextBook();
     if (window.scrollY < window.innerHeight * 2) prependPrevBook();
     clearTimeout(trimTimer);
@@ -458,6 +654,7 @@
   }, { passive: true });
 
   bookEl.addEventListener('click', (e) => {
+    if (esvAction(e)) return;
     if (window.getSelection && String(window.getSelection())) return;
     tapText(e);
   });
@@ -500,13 +697,15 @@
     flow.innerHTML = (c === 1 ? titleHTML(b) : '') + chapterHTML(b, c);
     pg.b = b; pg.c = c;
     measurePages();
+    if (SRC[b] === 'esv' && !esvMissing(b, c)) aheadEsv(b, c);
   }
   function measurePages() {
     layoutPager();
     flow.classList.add('no-anim');
     flow.style.transform = 'none';
     const vs = flow.querySelectorAll('.v');
-    const last = vs[vs.length - 1];
+    const last = flow.querySelector('.esv-credit') || vs[vs.length - 1];
+    if (!last) { pg.pages = 1; return; }   // an ESV chapter still loading
     const rects = last.getClientRects();
     const lastLeft = rects[rects.length - 1].left - flow.getBoundingClientRect().left;
     pg.pages = Math.floor((lastLeft + 2) / pg.step) + 1;
@@ -521,6 +720,7 @@
   // First verse that starts on the current page (or the one running onto it).
   function pagePosition() {
     const vs = flow.querySelectorAll('.v');
+    if (!vs.length) return { b: pg.b, c: pg.c, v: state.ribbon.b === pg.b && state.ribbon.c === pg.c ? state.ribbon.v : 1 };
     let pick = vs[0];
     for (const el of vs) {
       const p = pageOf(el);
@@ -543,7 +743,11 @@
   function prevPage() {
     if (pg.page > 0) return showPage(pg.page - 1, true);
     const p = prevChapter(pg.b, pg.c);
-    if (p) { renderPageChapter(p[0], p[1]); showPage(pg.pages - 1, false); updateTitle(); }
+    if (!p) return;
+    renderPageChapter(p[0], p[1]);
+    if (esvMissing(p[0], p[1])) setRibbon({ b: p[0], c: p[1], v: chapterLen(p[0], p[1]) });   // open at its end once loaded
+    showPage(pg.pages - 1, false);
+    updateTitle();
   }
   function nextChapter(b, c) {
     if (c < chapterCount(b)) return [b, c + 1];
@@ -570,6 +774,7 @@
   });
   pager.addEventListener('click', (e) => {
     if (swiped) { swiped = false; return; }
+    if (esvAction(e)) return;
     const x = e.clientX / window.innerWidth;
     if (!$('#versebar').hidden) return closeVerseBar();
     if (x > 0.7) nextPage();
@@ -610,6 +815,9 @@
     state.ribbon = { b, c, v };
     if (state.settings.mode === 'page') {
       pageGoTo(b, c, v);
+    } else if (SRC[b] === 'esv') {
+      if (renderedBook < 0 || renderedEsv !== esvKeyOf(b, c)) renderEsvChapter(b, c);
+      scrollToVerse(b, c, v);
     } else {
       if (renderedBook < 0 || !renderedBooks.includes(b)) renderBook(b);
       scrollToVerse(b, c, v);
@@ -689,7 +897,7 @@
     const q = ($('#text-search').value || '').trim().toLowerCase();
     const match = (id, group) => !q || id === state.settings.text || `${group} ${TEXTS[id].name}`.toLowerCase().includes(q);
     const opt = (id) => `<option value="${id}">${esc(TEXTS[id].name)}</option>`;
-    const core = ['kjv', 'lxx-en', 'lxx-gr', 'wlc'].filter((id) => match(id, 'English Greek Hebrew Septuagint'));
+    const core = ['kjv', ...(state.esvKey ? ['esv'] : []), 'lxx-en', 'lxx-gr', 'wlc'].filter((id) => match(id, 'English Greek Hebrew Septuagint ESV'));
     let h = core.length ? `<optgroup label="English &amp; original languages">${core.map(opt).join('')}</optgroup>` : '';
     const groups = {};
     LANG_TEXTS.forEach(([id, group]) => { if (match(id, group)) (groups[group] = groups[group] || []).push(id); });
@@ -733,6 +941,44 @@
   $('#set-mode').addEventListener('click', (e) => e.target.dataset.v && changeSetting('mode', e.target.dataset.v));
   $('#set-vn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('vn', e.target.dataset.v === 'on'));
   $('#set-cn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('cn', e.target.dataset.v === 'on'));
+
+  // ----- The owner's ESV key (Aa → Account) -----
+  // `synced`: a change the owner made (sent to their other devices), not a sign-out clearing it.
+  function setEsvKey(key, synced) {
+    if (state.esvKey === key) return;
+    state.esvKey = key;
+    esvCache.clear();
+    esvErrors.clear();
+    if (synced) touch(); else save();
+    fillTexts();
+    renderEsvKey();
+    if (state.settings.text !== 'esv' || !KJV) return;
+    if (!key) changeText('kjv');
+    else { buildText('esv'); renderedBook = -1; relayout(); }
+  }
+  function renderEsvKey() {
+    $('#acct-esv').hidden = !esvOwner;
+    $('#esv-form').hidden = !!state.esvKey;
+    $('#esv-saved').hidden = !state.esvKey;
+  }
+  $('#esv-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const key = $('#esv-key').value.trim().replace(/^Token\s+/i, '');
+    if (!key || !esvOwner || !KJV) return;
+    toast('Checking the key…');
+    try {
+      await fetchEsv(key, 42, 3);   // John 3, just to try the key
+    } catch (err) {
+      return toast(ESV_ERRORS[err.message] || 'That key didn’t work. Please check it.');
+    }
+    $('#esv-key').value = '';
+    setEsvKey(key, true);
+    changeText('esv');
+  });
+  $('#esv-remove').addEventListener('click', () => {
+    setEsvKey('', true);
+    toast('ESV key removed.');
+  });
 
   // ---------- Saved verses (highlights) ----------
   // Verses are saved in KJV numbering where there is one, so a highlight shows in every text.
@@ -1289,6 +1535,17 @@
     } else {
       setRibbon(pos);
     }
+    if (esvMissing(pos.b, pos.c)) {   // the ESV chapter is still being fetched
+      renderPlayer();
+      loadEsv(pos.b, pos.c, false).then(
+        () => { if (token === player.token) speakFrom(pos, offset); },
+        () => {
+          if (token !== player.token) return;
+          pausePlayer();
+          toast(ESV_ERRORS[esvErrors.get(esvKeyOf(pos.b, pos.c))] || 'Couldn’t load the ESV.');
+        });
+      return;
+    }
     clearHighlight();
     highlight(offset);
 
@@ -1425,6 +1682,10 @@
       toast(`${langOf(pos.b) === 'el' ? 'The Greek recording' : 'Daniel'} isn’t available here yet (or you’re offline). Using the device voice.`);
     }
     const full = spoken(verseText(pos.b, pos.c, pos.v));
+    if (!full.trim()) {   // a verse this text leaves out
+      setTimeout(() => { if (token === player.token) nextVerse(); }, 0);
+      return;
+    }
     const u = new SpeechSynthesisUtterance(full.slice(offset));
     let voice = currentVoice();
     const lang = langOf(pos.b);
@@ -1696,6 +1957,7 @@
       return;
     }
     KJV.forEach((book, b) => book[1].forEach((_, i) => CHAPTERS.push([b, i + 1])));
+    bookSizes = KJV.map(([, chapters]) => chapters.reduce((n, ch) => n + ch.length, 0));
     buildText('kjv');
     if (!TEXTS[state.settings.text]) await loadRemoteIndex();   // a language from the texts repo
     else loadRemoteIndex();
@@ -1731,6 +1993,7 @@
         bookmarks: state.bookmarks,
         highlights: state.highlights,
         plan: { start: state.plan.start, done: state.plan.done },
+        esvKey: state.esvKey,   // only ever set on the owner's account
         updatedAt: state.updatedAt,
       };
     },
@@ -1738,6 +2001,7 @@
     applyRemote(remote, uid) {
       const first = state.syncUid !== uid;
       const before = { ...state.ribbon };
+      const keyBefore = state.esvKey;
       if (first) {
         const seen = new Set(state.bookmarks.map((x) => x.t));
         state.bookmarks = state.bookmarks.concat((remote.bookmarks || []).filter((x) => !seen.has(x.t)));
@@ -1748,6 +2012,7 @@
           state.plan.done = sameStart ? { ...state.plan.done, ...remote.plan.done } : { ...remote.plan.done };
         }
         if ((remote.updatedAt || 0) > state.updatedAt && remote.ribbon) { state.ribbon = remote.ribbon; state.ribbonText = 'kjv'; }
+        if (esvOwner && !state.esvKey && remote.esvKey) state.esvKey = remote.esvKey;
         state.updatedAt = Date.now();
       } else {
         if (remote.ribbon) { state.ribbon = remote.ribbon; state.ribbonText = 'kjv'; }
@@ -1755,11 +2020,24 @@
         state.highlights = remote.highlights || {};
         state.plan.start = remote.plan ? remote.plan.start : null;
         state.plan.done = (remote.plan && remote.plan.done) || {};
+        state.esvKey = esvOwner ? remote.esvKey || '' : '';
         state.updatedAt = remote.updatedAt || 0;
       }
       state.syncUid = uid;
       save();
+      if (state.esvKey !== keyBefore) {
+        esvCache.clear();
+        esvErrors.clear();
+        fillTexts();
+        renderEsvKey();
+      }
       if (!BIBLE) return first;
+      if (esvOn() && !state.esvKey) {   // the ESV key was removed on another device
+        state.settings.text = 'kjv';
+        buildText('kjv');
+        applySettings();
+        fillTexts();
+      } else if (esvOn() && state.esvKey !== keyBefore) buildText('esv');
       syncRibbonText();
       const r = state.ribbon;
       if (r.b !== before.b || r.c !== before.c || r.v !== before.v) {
@@ -1776,6 +2054,19 @@
       return first;
     },
     setUid(uid) { state.syncUid = uid; save(); },
+    // Who is signed in (a confirmed account), so the ESV is offered only on the owner's account.
+    async setAccount(email) {
+      let owner = false;
+      try {
+        if (email && crypto.subtle) {
+          const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email.trim().toLowerCase()));
+          owner = Array.from(new Uint8Array(buf), (x) => x.toString(16).padStart(2, '0')).join('') === ESV_OWNER;
+        }
+      } catch (e) { /* can't check: not the owner */ }
+      esvOwner = owner;
+      if (!owner && state.esvKey) setEsvKey('', false);
+      renderEsvKey();
+    },
     releaseHold() { syncHold = false; },
     toast,
   };

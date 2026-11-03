@@ -137,6 +137,18 @@
     </div>
     <div id="acct-in" hidden>
       <p id="acct-verify" class="notice" hidden>Check your inbox to confirm your email, then come back here. <button type="button" class="link" id="btn-resend">Resend email</button> · <button type="button" class="link" id="btn-recheck">I’ve confirmed it</button></p>
+      <div id="acct-esv" class="acct-esv" hidden>
+        <h3>ESV</h3>
+        <form id="esv-form" autocomplete="off">
+          <p class="muted small-note">Paste your personal key from api.esv.org to read the ESV. It’s kept only in your account.</p>
+          <input id="esv-key" type="password" autocomplete="off" spellcheck="false" placeholder="ESV API key" required>
+          <button type="submit" class="primary wide">Add the ESV</button>
+        </form>
+        <div id="esv-saved" hidden>
+          <p class="muted small-note">The ESV is on: choose it under Text.</p>
+          <button type="button" class="secondary wide" id="esv-remove">Remove the ESV key</button>
+        </div>
+      </div>
       <button id="btn-signout" class="secondary wide">Sign out</button>
     </div>
     <p class="muted small-note">Signing in keeps your place, bookmarks, saved verses and reading plan the same on all your devices.</p>

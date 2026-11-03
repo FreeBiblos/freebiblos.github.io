@@ -328,6 +328,19 @@ button.link { color: var(--accent); text-decoration: underline; padding: 8px 0; 
 .notice { background: var(--hover); border-radius: 10px; padding: 10px 12px; font-size: 14px; line-height: 1.5; }
 .google { font-weight: 500; }
 
+/* ---------- ESV (owner's account) ---------- */
+.acct-esv { margin: 0 0 14px; padding: 0 0 14px; border-bottom: 1px solid var(--rule); }
+.acct-esv h3 { font-size: 15px; font-weight: 600; margin: 0; }
+.acct-esv .small-note { margin: 6px 0 10px; }
+.esv-note { color: var(--muted); font-style: italic; }
+.chapter .esv-credit {
+  margin: 1.4em 0 0; text-indent: 0; font-size: 12px; line-height: 1.5; color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.esv-credit a { color: inherit; }
+.esv-nav { display: flex; justify-content: space-between; gap: 12px; margin: 1.6em 0 3em; font-size: 15px; }
+.esv-nav button { max-width: 48%; }
+
 /* ---------- Saved verses ---------- */
 :root { --hl-yellow: rgba(255, 204, 0, .32); --hl-green: rgba(76, 175, 80, .26); --hl-blue: rgba(66, 133, 244, .22); --hl-pink: rgba(233, 30, 99, .2); }
 body.theme-night { --hl-yellow: rgba(255, 204, 0, .25); --hl-green: rgba(76, 175, 80, .25); --hl-blue: rgba(66, 133, 244, .28); --hl-pink: rgba(233, 30, 99, .26); }
