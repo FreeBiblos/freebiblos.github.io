@@ -103,6 +103,8 @@
   const ESV_OWNER = 'c15b0626c18c55f9ef6385f2974aee3238526b6484833cd1993b083fdc25eeb0';   // SHA-256 of the owner's sign-in email
   const ESV_API = 'https://api.esv.org/v3/passage/text/';
   let esvOwner = false;
+  let esvAccountGen = 0;          // bumped whenever the signed-in account changes
+  let esvGen = 0;                 // bumped whenever the key changes, so replies for an old key are ignored
   const esvCache = new Map();     // 'b:c' -> verses of a fetched chapter, least recently used first
   const esvPending = new Map();   // 'b:c' -> request in flight
   const esvErrors = new Map();    // 'b:c' -> why the last request failed
@@ -139,6 +141,7 @@
       updatedAt: s.updatedAt || 0,   // last change to synced data (ribbon, bookmarks, plan)
       syncUid: s.syncUid || null,    // account this device last synced with
       esvKey: typeof s.esvKey === 'string' ? s.esvKey : '',   // the owner's ESV API key (owner's account only)
+      esvKeyAt: +s.esvKeyAt || 0,    // when the owner last added or removed it, so the newest change syncs
     };
   }
   let saveTimer = 0;
@@ -314,11 +317,13 @@
   const esvKeyOf = (b, c) => `${b}:${c}`;
   const esvOn = () => SRC[0] === 'esv';
   const esvMissing = (b, c) => SRC[b] === 'esv' && !esvCache.has(esvKeyOf(b, c));
-  const ESV_NOTICE = 'Scripture quotations are from the ESV® Bible (The Holy Bible, English Standard Version®), © 2001 by Crossway, a publishing ministry of Good News Publishers. Used by permission. All rights reserved.';
+  const ESV_NOTICE = 'Scripture quotations are from the ESV® Bible (The Holy Bible, English Standard Version®), © 2001 by Crossway, a publishing ministry of Good News Publishers. Used by permission. All rights reserved. The ESV text may not be quoted in any publication made available to the public by a Creative Commons license. The ESV may not be translated into any other language. Users may not copy or download more than 500 verses of the ESV Bible or more than one half of any book of the ESV Bible.';
   const ESV_ERRORS = {
     offline: 'The ESV needs an internet connection.',
     key: 'Your ESV key wasn’t accepted. Check it under Aa → Account.',
-    limit: 'The ESV’s daily limit has been reached. Please try again later.',
+    limit: 'Too many ESV requests just now. Please wait a minute and try again.',
+    // Crossway's error replies can't be read by a browser, so a refused key looks like this.
+    refused: 'The ESV didn’t answer. Check your key under Aa → Account, or try again later.',
   };
   // The API's limits on what may be shown or kept at once: 500 verses, and no more than half of any
   // book (a single chapter may always be fetched, which covers one-chapter books).
@@ -341,14 +346,15 @@
     const vs = esvCache.get(k);
     if (vs) { esvCache.delete(k); esvCache.set(k, vs); }
   }
+  const esvShown = () => (state.settings.mode === 'page' ? esvKeyOf(pg.b, pg.c) : renderedEsv);
   // Keep a fetched chapter, letting go of the least recently used ones to stay inside the limits.
-  // A chapter fetched ahead never pushes out the one on screen; it is dropped instead.
-  function keepEsv(k, verses, ahead) {
-    const shown = esvKeyOf(state.ribbon.b, state.ribbon.c);
+  // Only the chapter on screen may push out others; any other reply that doesn't fit is dropped.
+  function keepEsv(k, verses) {
+    const shown = esvShown();
     const fits = () => esvFits([...esvCache.entries(), [k, verses]]);
     for (const old of [...esvCache.keys()]) {
       if (fits()) break;
-      if (!(ahead && old === shown)) dropEsv(old);
+      if (old !== shown || k === shown) dropEsv(old);
     }
     if (!fits()) return false;
     esvCache.set(k, verses);
@@ -372,20 +378,36 @@
       const para = i > 1 && /\n\s*\n\s*$|\n[ \t]+$/.test(parts[i - 1]);
       verses[n - 1] = verses[n - 1] ? `${verses[n - 1]} ${t}` : (para ? '¶' : '') + t;
     }
+    if (verses.filter(Boolean).length < count * 0.6) throw new Error('format');   // not the whole chapter
     return verses;
   }
+  // Pace requests well inside the API's limits (60 a minute, 1,000 an hour).
+  const esvSent = [];
+  async function esvTurn() {
+    for (;;) {
+      const now = Date.now();
+      while (esvSent.length && esvSent[0] < now - 3600e3) esvSent.shift();
+      if (esvSent.length >= 950) throw new Error('limit');
+      const minute = esvSent.filter((t) => t > now - 60e3);
+      if (minute.length < 50) { esvSent.push(now); return; }
+      await new Promise((r) => setTimeout(r, minute[0] + 60e3 - now + 50));
+    }
+  }
   async function fetchEsv(key, b, c) {
+    const name = b === 18 ? 'Psalm' : KJV[b][0];
     const params = new URLSearchParams({
-      q: `${b === 18 ? 'Psalm' : KJV[b][0]} ${c}`,
+      q: KJV[b][1].length === 1 ? name : `${name} ${c}`,   // "Jude 1" could be read as Jude 1:1
+
       'include-passage-references': 'false', 'include-verse-numbers': 'true', 'include-first-verse-numbers': 'true',
       'include-footnotes': 'false', 'include-footnote-body': 'false', 'include-headings': 'false',
       'include-short-copyright': 'false', 'include-copyright': 'false', 'include-selahs': 'true',
       'indent-poetry': 'false', 'indent-paragraphs': '2', 'line-length': '0',
     });
+    await esvTurn();
     let res;
     try {
       res = await fetch(`${ESV_API}?${params}`, { headers: { Authorization: `Token ${key}` }, cache: 'no-store' });
-    } catch (e) { throw new Error('offline'); }
+    } catch (e) { throw new Error(navigator.onLine === false ? 'offline' : 'refused'); }
     if (res.status === 401 || res.status === 403) throw new Error('key');
     if (res.status === 429) throw new Error('limit');
     if (!res.ok) throw new Error('server');
@@ -398,31 +420,37 @@
   function fetchEsvOnce(b, c) {
     const k = esvKeyOf(b, c);
     if (!esvPending.has(k)) {
-      const key = state.esvKey;
+      const key = state.esvKey, gen = esvGen;
       esvErrors.delete(k);
-      esvPending.set(k, fetchEsv(key, b, c)
-        .then((verses) => { if (key !== state.esvKey) throw new Error('key'); return verses; })
-        .catch((e) => { esvErrors.set(k, e.message); throw e; })
-        .finally(() => esvPending.delete(k)));
+      const req = fetchEsv(key, b, c)
+        .then((verses) => { if (gen !== esvGen) throw new Error('stale'); return verses; })
+        .catch((e) => { if (gen === esvGen) esvErrors.set(k, e.message); throw e; })
+        .finally(() => { if (esvPending.get(k) === req) esvPending.delete(k); });
+      esvPending.set(k, req);
     }
     return esvPending.get(k);
   }
-  function loadEsv(b, c, ahead) {
+  function loadEsv(b, c) {
     const k = esvKeyOf(b, c);
     if (esvCache.has(k)) return Promise.resolve(true);
-    return fetchEsvOnce(b, c).then((verses) => esvCache.has(k) || keepEsv(k, verses, ahead));
+    return fetchEsvOnce(b, c).then((verses) => esvCache.has(k) || keepEsv(k, verses));
   }
-  // A chapter is needed on screen: fetch it, then draw it in place of the placeholder.
-  // After a failure it waits for "Try again" rather than asking over and over.
+  // A chapter is needed on screen: fetch it, then draw it in place of the placeholder. It waits a
+  // moment first, so paging quickly past chapters doesn't fetch each one; after a failure it waits
+  // for "Try again" rather than asking over and over.
+  let esvWantTimer = 0;
   function wantEsv(b, c) {
     const k = esvKeyOf(b, c);
-    if (esvPending.has(k) || esvErrors.has(k)) return;
-    loadEsv(b, c, false).then(() => redrawEsv(b, c), () => redrawEsv(b, c));
+    if (esvErrors.has(k)) return;
+    clearTimeout(esvWantTimer);
+    esvWantTimer = setTimeout(() => {
+      if (esvShown() !== k) return;
+      if (esvCache.has(k)) return redrawEsv(b, c);
+      loadEsv(b, c).then(() => redrawEsv(b, c), () => redrawEsv(b, c));
+    }, esvPending.has(k) ? 0 : 300);
   }
   function redrawEsv(b, c) {
-    if (!esvOn()) return;
-    const onScreen = state.settings.mode === 'page' ? pg.b === b && pg.c === c : renderedEsv === esvKeyOf(b, c);
-    if (!onScreen) return;
+    if (!esvOn() || esvShown() !== esvKeyOf(b, c)) return;
     const r = state.ribbon;
     renderedEsv = '';
     player.internal = true;   // redrawing isn't the reader moving
@@ -436,7 +464,12 @@
     const k = esvKeyOf(n[0], n[1]);
     if (esvCache.has(k) || esvPending.has(k)) return;
     if (!esvFits([[esvKeyOf(b, c), BIBLE[b][1][c - 1]], [k, KJV[n[0]][1][n[1] - 1]]])) return;
-    loadEsv(n[0], n[1], true).catch(() => esvErrors.delete(k));   // tried again when it's needed
+    // If the reader has turned to it meanwhile, draw it (or its error); otherwise a failure is
+    // simply tried again when the chapter is needed.
+    loadEsv(n[0], n[1]).then(() => redrawEsv(n[0], n[1]), () => {
+      if (esvShown() !== k) esvErrors.delete(k);
+      redrawEsv(n[0], n[1]);
+    });
   }
   function esvWaitHTML(b, c) {
     wantEsv(b, c);
@@ -714,7 +747,7 @@
     pg.page = Math.max(0, Math.min(pg.pages - 1, p));
     flow.classList.toggle('no-anim', !animate);
     flow.style.transform = `translateX(${-pg.page * pg.step}px)`;
-    $('#pagefoot').textContent = `${bookName(pg.b)} ${chLabel(pg.b, pg.c)}  ·  ${pg.page + 1} of ${pg.pages}`;
+    $('#pagefoot').textContent = `${bookName(pg.b)} ${chLabel(pg.b, pg.c)}${SRC[pg.b] === 'esv' ? ' (ESV)' : ''}  ·  ${pg.page + 1} of ${pg.pages}`;
     setRibbon(pagePosition());
   }
   // First verse that starts on the current page (or the one running onto it).
@@ -897,7 +930,7 @@
     const q = ($('#text-search').value || '').trim().toLowerCase();
     const match = (id, group) => !q || id === state.settings.text || `${group} ${TEXTS[id].name}`.toLowerCase().includes(q);
     const opt = (id) => `<option value="${id}">${esc(TEXTS[id].name)}</option>`;
-    const core = ['kjv', ...(state.esvKey ? ['esv'] : []), 'lxx-en', 'lxx-gr', 'wlc'].filter((id) => match(id, 'English Greek Hebrew Septuagint ESV'));
+    const core = ['kjv', ...(state.esvKey ? ['esv'] : []), 'lxx-en', 'lxx-gr', 'wlc'].filter((id) => match(id, 'English Greek Hebrew Septuagint'));
     let h = core.length ? `<optgroup label="English &amp; original languages">${core.map(opt).join('')}</optgroup>` : '';
     const groups = {};
     LANG_TEXTS.forEach(([id, group]) => { if (match(id, group)) (groups[group] = groups[group] || []).push(id); });
@@ -964,6 +997,9 @@
   function setEsvKey(key, synced) {
     if (state.esvKey === key) return;
     state.esvKey = key;
+    if (synced) state.esvKeyAt = Date.now();
+    esvGen++;
+    esvPending.clear();
     esvCache.clear();
     esvErrors.clear();
     if (synced) touch(); else save();
@@ -983,11 +1019,13 @@
     const key = $('#esv-key').value.trim().replace(/^Token\s+/i, '');
     if (!key || !esvOwner || !KJV) return;
     toast('Checking the key…');
+    const gen = esvAccountGen;
+    let err = null;
     try {
       await fetchEsv(key, 42, 3);   // John 3, just to try the key
-    } catch (err) {
-      return toast(ESV_ERRORS[err.message] || 'That key didn’t work. Please check it.');
-    }
+    } catch (e) { err = e; }
+    if (gen !== esvAccountGen || !esvOwner) return;   // signed out or switched account meanwhile
+    if (err) return toast(['offline', 'limit'].includes(err.message) ? ESV_ERRORS[err.message] : 'That key didn’t work. Please check it.');
     $('#esv-key').value = '';
     setEsvKey(key, true);
     changeText('esv');
@@ -1554,7 +1592,7 @@
     }
     if (esvMissing(pos.b, pos.c)) {   // the ESV chapter is still being fetched
       renderPlayer();
-      loadEsv(pos.b, pos.c, false).then(
+      loadEsv(pos.b, pos.c).then(
         () => { if (token === player.token) speakFrom(pos, offset); },
         () => {
           if (token !== player.token) return;
@@ -1792,16 +1830,22 @@
     speeds[key] = Math.round(next * 100) / 100;
     save();
   }
+  // Verses the ESV leaves out (footnoted there) have no text: step over them.
+  const blankEsv = (b, c, v) => SRC[b] === 'esv' && !esvMissing(b, c) && !verseText(b, c, v);
   function nextVerse() {
     const p = player.pos;
-    if (p.v < BIBLE[p.b][1][p.c - 1].length) return speakFrom({ b: p.b, c: p.c, v: p.v + 1 }, 0);
+    let v = p.v + 1;
+    while (v <= chapterLen(p.b, p.c) && blankEsv(p.b, p.c, v)) v++;
+    if (v <= chapterLen(p.b, p.c)) return speakFrom({ b: p.b, c: p.c, v }, 0);
     const n = nextChapter(p.b, p.c);
     if (n) speakFrom({ b: n[0], c: n[1], v: 1 }, 0);
     else stopPlayer();
   }
   function prevVerse() {
     const p = player.pos;
-    if (p.v > 1) return speakFrom({ b: p.b, c: p.c, v: p.v - 1 }, 0);
+    let v = p.v - 1;
+    while (v > 1 && blankEsv(p.b, p.c, v)) v--;
+    if (v >= 1) return speakFrom({ b: p.b, c: p.c, v }, 0);
     const n = prevChapter(p.b, p.c);
     if (n) speakFrom({ b: n[0], c: n[1], v: BIBLE[n[0]][1][n[1] - 1].length }, 0);
     else speakFrom(p, 0);
@@ -2012,6 +2056,7 @@
         highlights: state.highlights,
         plan: { start: state.plan.start, done: state.plan.done },
         esvKey: state.esvKey,   // only ever set on the owner's account
+        esvKeyAt: state.esvKeyAt,
         updatedAt: state.updatedAt,
       };
     },
@@ -2030,7 +2075,6 @@
           state.plan.done = sameStart ? { ...state.plan.done, ...remote.plan.done } : { ...remote.plan.done };
         }
         if ((remote.updatedAt || 0) > state.updatedAt && remote.ribbon) { state.ribbon = remote.ribbon; state.ribbonText = 'kjv'; }
-        if (esvOwner && !state.esvKey && remote.esvKey) state.esvKey = remote.esvKey;
         state.updatedAt = Date.now();
       } else {
         if (remote.ribbon) { state.ribbon = remote.ribbon; state.ribbonText = 'kjv'; }
@@ -2038,12 +2082,19 @@
         state.highlights = remote.highlights || {};
         state.plan.start = remote.plan ? remote.plan.start : null;
         state.plan.done = (remote.plan && remote.plan.done) || {};
-        state.esvKey = esvOwner ? remote.esvKey || '' : '';
         state.updatedAt = remote.updatedAt || 0;
+      }
+      // The ESV key syncs by its own timestamp, so a device that missed a change can't undo it.
+      if (!esvOwner) state.esvKey = '';
+      else if ((remote.esvKeyAt || 0) > state.esvKeyAt || (!state.esvKey && remote.esvKey && !remote.esvKeyAt)) {
+        state.esvKey = remote.esvKey || '';
+        state.esvKeyAt = remote.esvKeyAt || 0;
       }
       state.syncUid = uid;
       save();
       if (state.esvKey !== keyBefore) {
+        esvGen++;
+        esvPending.clear();
         esvCache.clear();
         esvErrors.clear();
         fillTexts();
@@ -2075,6 +2126,7 @@
     setUid(uid) { state.syncUid = uid; save(); },
     // Who is signed in (a confirmed account), so the ESV is offered only on the owner's account.
     async setAccount(email) {
+      const gen = ++esvAccountGen;
       let owner = false;
       try {
         if (email && crypto.subtle) {
@@ -2082,8 +2134,15 @@
           owner = Array.from(new Uint8Array(buf), (x) => x.toString(16).padStart(2, '0')).join('') === ESV_OWNER;
         }
       } catch (e) { /* can't check: not the owner */ }
+      if (gen !== esvAccountGen) return;   // a newer sign-in or sign-out has taken over
       esvOwner = owner;
-      if (!owner && state.esvKey) setEsvKey('', false);
+      if (!owner && state.esvKey) {
+        // Like signing out: the next sign-in merges with the cloud, so the key comes back from there
+        // instead of an empty one being sent up over it.
+        state.syncUid = null;
+        state.esvKeyAt = 0;
+        setEsvKey('', false);
+      }
       renderEsvKey();
     },
     releaseHold() { syncHold = false; },

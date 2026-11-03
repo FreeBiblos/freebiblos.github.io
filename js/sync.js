@@ -107,7 +107,7 @@ if (!firebaseConfig.apiKey) {
   onAuthStateChanged(auth, async (u) => {
     user = u;
     message = '';
-    await K.setAccount(canSync() ? u.email : null);
+    if (typeof K.setAccount === 'function') await K.setAccount(canSync() ? u.email : null).catch(() => {});
     render();
     if (u) await pull();
     K.releaseHold();
@@ -155,7 +155,7 @@ if (!firebaseConfig.apiKey) {
     await user.reload();
     await user.getIdToken(true);   // refresh so the database sees the confirmed email
     user = auth.currentUser;
-    await K.setAccount(canSync() ? user.email : null);
+    if (typeof K.setAccount === 'function') await K.setAccount(canSync() ? user.email : null).catch(() => {});
     if (canSync()) { K.toast('Email confirmed. Syncing…'); await pull(); } else K.toast('Not confirmed yet. Please use the link in the email.');
   }));
   $('#btn-signout').addEventListener('click', async () => {
