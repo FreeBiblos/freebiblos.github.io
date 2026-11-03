@@ -316,6 +316,10 @@ body.follow-verse .v.reading { background: var(--flash); }
 }
 .account-row .chev { margin-left: auto; color: var(--muted); font-size: 20px; }
 .account-row:hover { background: var(--hover); }
+.install-row b { display: block; font-weight: 500; }
+.install-row small { display: block; color: var(--muted); font-size: 13px; margin-top: 1px; }
+.install-row .acct-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+.install-help { margin: -4px 0 10px; }
 #panel-account input {
   display: block; width: 100%; font: inherit; font-size: 16px; padding: 11px 12px; margin: 0 0 8px;
   border: 1px solid var(--rule); border-radius: 10px; background: var(--bg); color: var(--text);

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Free Bible</title>
-<meta name="description" content="A simple, book-like King James Bible reader.">
+<meta name="description" content="A free, book-like Bible: the King James Version and Bibles in over 130 languages. Works offline.">
 <meta name="theme-color" content="#f4eddc">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -159,6 +159,8 @@
   <div class="panel-head"><h2>Display</h2><button class="close" aria-label="Close">✕</button></div>
   <div class="panel-body">
     <button id="open-account" class="account-row"><span class="acct-icon" aria-hidden="true">👤</span><span id="account-summary">Sign in to save your progress</span><span class="chev">›</span></button>
+    <button id="btn-install" class="account-row install-row" hidden><span class="acct-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></svg></span><span><b>Install the app</b><small>Works offline · no app store needed</small></span><span class="chev">›</span></button>
+    <p id="install-help" class="notice install-help" hidden></p>
     <div class="row"><span>Text</span>
       <div class="text-choose"><select id="set-text" class="text-pick" aria-label="Bible text"></select><input id="text-search" type="search" placeholder="Search languages" aria-label="Search languages"></div>
     </div>

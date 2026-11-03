@@ -928,6 +928,7 @@
     if (player.active) stopPlayer();
     const k = toKjv(state.ribbon);
     state.settings.text = id;
+    esvPageMode();
     buildText(id);
     state.ribbon = fromKjv(k);
     state.ribbonText = id;
@@ -938,7 +939,23 @@
     save();
     toast(t.name);
   }
-  $('#set-mode').addEventListener('click', (e) => e.target.dataset.v && changeSetting('mode', e.target.dataset.v));
+  // The ESV is shown one chapter at a time (Crossway's terms), so it reads by turning pages; the
+  // reader's own choice comes back when they switch to another text.
+  function esvPageMode() {
+    const s = state.settings;
+    if (s.text === 'esv') {
+      if (s.mode !== 'page') { s.modeBeforeEsv = s.mode; s.mode = 'page'; setBars(false); }
+    } else if (s.modeBeforeEsv) {
+      s.mode = s.modeBeforeEsv;
+      delete s.modeBeforeEsv;
+      if (s.mode === 'scroll') { flow.innerHTML = ''; setBars(true); }
+    }
+  }
+  $('#set-mode').addEventListener('click', (e) => {
+    if (!e.target.dataset.v) return;
+    if (state.settings.text === 'esv' && e.target.dataset.v !== 'page') return toast('The ESV reads by pages: Crossway allows one chapter at a time.');
+    changeSetting('mode', e.target.dataset.v);
+  });
   $('#set-vn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('vn', e.target.dataset.v === 'on'));
   $('#set-cn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('cn', e.target.dataset.v === 'on'));
 
@@ -1966,9 +1983,10 @@
       if (!buildText(state.settings.text)) {
         state.settings.text = 'kjv';
         buildText('kjv');
-        applySettings();
       }
     }
+    esvPageMode();
+    applySettings();
     $('#loading').remove();
     if (!TEXTS[state.ribbonText]) state.ribbonText = 'kjv';
     syncRibbonText();
@@ -2034,6 +2052,7 @@
       if (!BIBLE) return first;
       if (esvOn() && !state.esvKey) {   // the ESV key was removed on another device
         state.settings.text = 'kjv';
+        esvPageMode();
         buildText('kjv');
         applySettings();
         fillTexts();
@@ -2070,6 +2089,40 @@
     releaseHold() { syncHold = false; },
     toast,
   };
+
+  // ---------- Install as an app ----------
+  // Android (Chrome, Edge, Samsung Internet) has its own install prompt, which puts Free Bible in the
+  // app drawer; on iPhone and other browsers the button shows how to add it to the home screen.
+  let installPrompt = null;
+  const installed = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  $('#btn-install').hidden = installed();
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();   // offer it from the menu instead of the browser's banner
+    installPrompt = e;
+    $('#btn-install').hidden = installed();
+  });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    $('#btn-install').hidden = true;
+    $('#install-help').hidden = true;
+    toast('Installed. Open Free Bible from your home screen.');
+  });
+  $('#btn-install').addEventListener('click', async () => {
+    if (installPrompt) {
+      const prompt = installPrompt;
+      installPrompt = null;   // each prompt can be shown once
+      prompt.prompt();
+      const choice = await prompt.userChoice.catch(() => null);
+      if (choice && choice.outcome === 'accepted') $('#btn-install').hidden = true;
+      return;
+    }
+    const help = $('#install-help');
+    help.textContent = isIos
+      ? 'On iPhone or iPad: in Safari, tap the Share button, then “Add to Home Screen”.'
+      : 'Open your browser’s menu (⋮) and choose “Install app” or “Add to Home screen”.';
+    help.hidden = !help.hidden;
+  });
 
   if ('serviceWorker' in navigator) {
     // When an updated version finishes installing, reload once so every file is the new version.
