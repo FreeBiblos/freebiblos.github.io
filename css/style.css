@@ -123,7 +123,10 @@ body.hide-cn .chapter + .chapter { margin-top: 1em; }
 /* ---------- Page mode ---------- */
 body.mode-page { overflow: hidden; }
 body.mode-page #reader { display: none; }
-#pager { position: fixed; inset: 0; overflow: hidden; background: var(--bg); touch-action: pan-y; }
+#pager {
+  position: fixed; inset: 0; overflow: hidden; background: var(--bg);
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
 #flow {
   position: absolute;
   column-fill: auto;

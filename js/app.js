@@ -117,7 +117,7 @@
 
   // ---------- Saved state ----------
   const DEFAULTS = {
-    settings: { vn: false, cn: true, mode: 'scroll', theme: 'paper', font: 'literata', size: 20, align: 'left', voice: '', rate: 0.9, follow: 'verse', text: 'kjv', under: false },
+    settings: { fullscreen: true, vn: false, cn: true, mode: 'scroll', theme: 'paper', font: 'literata', size: 20, align: 'left', voice: '', rate: 0.9, follow: 'verse', text: 'kjv', under: false },
     ribbon: { b: 0, c: 1, v: 1 },
     ribbonText: 'kjv',         // which text's numbering the ribbon is in
     bookmarks: [],
@@ -687,6 +687,7 @@
   }, { passive: true });
 
   bookEl.addEventListener('click', (e) => {
+    goFullscreen();
     if (esvAction(e)) return;
     if (window.getSelection && String(window.getSelection())) return;
     tapText(e);
@@ -768,19 +769,26 @@
     const el = flow.querySelector(`.v[data-v="${v}"]`);
     showPage(el && v > 1 ? pageOf(el) : 0, false);
   }
-  function nextPage() {
-    if (pg.page < pg.pages - 1) return showPage(pg.page + 1, true);
-    const n = nextChapter(pg.b, pg.c);
-    if (n) { renderPageChapter(n[0], n[1]); showPage(0, false); updateTitle(); }
-  }
-  function prevPage() {
-    if (pg.page > 0) return showPage(pg.page - 1, true);
-    const p = prevChapter(pg.b, pg.c);
-    if (!p) return;
-    renderPageChapter(p[0], p[1]);
-    if (esvMissing(p[0], p[1])) setRibbon({ b: p[0], c: p[1], v: chapterLen(p[0], p[1]) });   // open at its end once loaded
-    showPage(pg.pages - 1, false);
+  // Turn one page forward (1) or back (-1). At the end of a chapter the next one slides in from the
+  // side it comes from.
+  function turnPage(dir) {
+    if (dir > 0 && pg.page < pg.pages - 1) return showPage(pg.page + 1, true);
+    if (dir < 0 && pg.page > 0) return showPage(pg.page - 1, true);
+    const to = dir > 0 ? nextChapter(pg.b, pg.c) : prevChapter(pg.b, pg.c);
+    if (!to) return showPage(pg.page, true);   // the very start or end: spring back
+    renderPageChapter(to[0], to[1]);
+    if (dir < 0 && esvMissing(to[0], to[1])) setRibbon({ b: to[0], c: to[1], v: chapterLen(to[0], to[1]) });   // open at its end once loaded
+    const p = dir > 0 ? 0 : pg.pages - 1;
+    slideTo(-p * pg.step + dir * pg.step, false);   // start just off to that side
+    void flow.offsetWidth;
+    showPage(p, true);
     updateTitle();
+  }
+  const nextPage = () => turnPage(1);
+  const prevPage = () => turnPage(-1);
+  function slideTo(x, animate) {
+    flow.classList.toggle('no-anim', !animate);
+    flow.style.transform = `translateX(${x}px)`;
   }
   function nextChapter(b, c) {
     if (c < chapterCount(b)) return [b, c + 1];
@@ -791,29 +799,80 @@
     return b > 0 ? [b - 1, chapterCount(b - 1)] : null;
   }
 
-  let touchX = null, touchY = null, swiped = false;
-  pager.addEventListener('touchstart', (e) => {
-    touchX = e.touches[0].clientX; touchY = e.touches[0].clientY; swiped = false;
-  }, { passive: true });
-  pager.addEventListener('touchend', (e) => {
-    if (touchX === null) return;
-    const dx = e.changedTouches[0].clientX - touchX;
-    const dy = e.changedTouches[0].clientY - touchY;
-    touchX = null;
-    if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
-      swiped = true;
-      dx < 0 ? nextPage() : prevPage();
+  // The page follows a finger (or the mouse) sliding sideways, and turns once pulled about a third of
+  // the way or flicked; otherwise it springs back. A tap shows or hides the menu bar; pressing and
+  // holding a verse opens the verse toolbar (highlight, copy, share).
+  const drag = { id: null, x: 0, y: 0, t: 0, dx: 0, v: 0, lastX: 0, lastT: 0, active: false, moved: false, hold: 0, held: false, swiped: false };
+  pager.addEventListener('pointerdown', (e) => {
+    if (drag.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    clearTimeout(drag.hold);
+    const now = performance.now();
+    Object.assign(drag, { id: e.pointerId, x: e.clientX, y: e.clientY, t: now, dx: 0, v: 0, lastX: e.clientX, lastT: now, active: false, moved: false, held: false, swiped: false });
+    const v = e.target.closest('#flow .v');
+    if (!v || e.target.closest('.kjv-under')) return;
+    drag.hold = setTimeout(() => {
+      if (drag.id === null || drag.moved) return;
+      drag.held = true;
+      openVerseBar(v);
+      setBars(true);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 450);
+  });
+  pager.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) > 8) { drag.moved = true; clearTimeout(drag.hold); }
+    // How fast the finger is moving now (px/ms), smoothed: a flick turns the page however short it is.
+    const now = performance.now();
+    if (now > drag.lastT) drag.v = drag.v * 0.4 + ((e.clientX - drag.lastX) / (now - drag.lastT)) * 0.6;
+    drag.lastX = e.clientX; drag.lastT = now;
+    if (!drag.active) {
+      if (drag.held || Math.abs(dx) < 10 || Math.abs(dx) < Math.abs(dy)) return;
+      drag.active = true;
+      try { pager.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      if (!$('#versebar').hidden) closeVerseBar();
     }
+    // Pull against resistance at the very start and end of the Bible.
+    const stuck = dx > 0 ? pg.page === 0 && !prevChapter(pg.b, pg.c) : pg.page === pg.pages - 1 && !nextChapter(pg.b, pg.c);
+    drag.dx = stuck ? dx / 3 : dx;
+    slideTo(-pg.page * pg.step + drag.dx, false);
   });
+  function endDrag(e, cancelled) {
+    if (e.pointerId !== drag.id) return;
+    drag.id = null;
+    clearTimeout(drag.hold);
+    if (!drag.active) return;
+    drag.active = false;
+    drag.swiped = true;   // the click that follows isn't a tap
+    const dx = drag.dx;
+    const v = performance.now() - drag.lastT > 100 ? 0 : drag.v;   // held still before letting go: no flick
+    const flick = Math.abs(dx) > 30 && Math.abs(v) > 0.45 && Math.sign(v) === Math.sign(dx);
+    const far = !cancelled && (Math.abs(dx) > pg.step * 0.33 || flick);
+    if (far) turnPage(dx < 0 ? 1 : -1);
+    else slideTo(-pg.page * pg.step, true);   // spring back
+  }
+  pager.addEventListener('pointerup', (e) => endDrag(e, false));
+  pager.addEventListener('pointercancel', (e) => endDrag(e, true));
+  pager.addEventListener('contextmenu', (e) => e.preventDefault());   // press-and-hold is for verses
   pager.addEventListener('click', (e) => {
-    if (swiped) { swiped = false; return; }
+    goFullscreen();
+    if (drag.swiped || drag.held) { drag.swiped = drag.held = false; return; }
     if (esvAction(e)) return;
-    const x = e.clientX / window.innerWidth;
     if (!$('#versebar').hidden) return closeVerseBar();
-    if (x > 0.7) nextPage();
-    else if (x < 0.3) prevPage();
-    else tapText(e);
+    setBars(!barsShown());
   });
+  // A mouse wheel or trackpad turns one page per gesture.
+  let wheelSum = 0, wheelLocked = false, wheelQuiet = 0;
+  pager.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    clearTimeout(wheelQuiet);
+    wheelQuiet = setTimeout(() => { wheelLocked = false; wheelSum = 0; }, 250);
+    if (wheelLocked) return;
+    wheelSum += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (Math.abs(wheelSum) < 40) return;
+    turnPage(wheelSum > 0 ? 1 : -1);
+    wheelLocked = true;
+  }, { passive: false });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') return closePanels();
     // Space works the play/pause button (except while typing in a box).
@@ -895,7 +954,7 @@
     document.querySelector('meta[name="theme-color"]').content = THEME_COLORS[s.theme];
     $('#btn-vn').setAttribute('aria-pressed', String(s.vn));
     if ($('#set-text').value !== s.text) $('#set-text').value = s.text;
-    for (const [id, val] of [['#set-font', s.font], ['#set-theme', s.theme], ['#set-align', s.align], ['#set-under', s.under ? 'on' : 'off'], ['#set-follow', s.follow], ['#set-mode', s.mode], ['#set-vn', s.vn ? 'on' : 'off'], ['#set-cn', s.cn ? 'on' : 'off']]) {
+    for (const [id, val] of [['#set-font', s.font], ['#set-theme', s.theme], ['#set-align', s.align], ['#set-under', s.under ? 'on' : 'off'], ['#set-follow', s.follow], ['#set-mode', s.mode], ['#set-vn', s.vn ? 'on' : 'off'], ['#set-cn', s.cn ? 'on' : 'off'], ['#set-full', s.fullscreen ? 'on' : 'off']]) {
       $(id).querySelectorAll('button').forEach((btn) => btn.classList.toggle('on', btn.dataset.v === val));
     }
   }
@@ -991,6 +1050,23 @@
   });
   $('#set-vn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('vn', e.target.dataset.v === 'on'));
   $('#set-cn').addEventListener('click', (e) => e.target.dataset.v && changeSetting('cn', e.target.dataset.v === 'on'));
+
+  // ----- Full screen -----
+  // On phones and tablets the reader fills the whole screen (no status bar or navigation buttons):
+  // browsers only allow this after a tap, so it starts at the first tap on the page, and again after
+  // the phone leaves it (e.g. the back gesture). Aa → Full screen turns it off.
+  const canFullscreen = () => !!document.fullscreenEnabled && matchMedia('(pointer: coarse)').matches;
+  function goFullscreen() {
+    if (!state.settings.fullscreen || !canFullscreen() || document.fullscreenElement) return;
+    try { document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {}); } catch (e) { /* not allowed here */ }
+  }
+  $('#row-fullscreen').hidden = !canFullscreen();
+  $('#set-full').addEventListener('click', (e) => {
+    if (!e.target.dataset.v) return;
+    changeSetting('fullscreen', e.target.dataset.v === 'on');
+    if (state.settings.fullscreen) goFullscreen();
+    else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  });
 
   // ----- The owner's ESV key (Aa → Account) -----
   // `synced`: a change the owner made (sent to their other devices), not a sign-out clearing it.
